@@ -1,0 +1,9 @@
+{
+  "name": "tipalets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Supabase-backed Telegram donation alert website for OBS widgets",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
