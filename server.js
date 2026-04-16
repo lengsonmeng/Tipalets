@@ -13,6 +13,8 @@ const SUPABASE_URL = (process.env.SUPABASE_URL || '').trim();
 const SUPABASE_PUBLISHABLE_KEY = (process.env.SUPABASE_PUBLISHABLE_KEY || '').trim();
 const SUPABASE_SERVICE_ROLE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_SYNC_SECRET = (process.env.TELEGRAM_SYNC_SECRET || '').trim();
+const CRON_SECRET = (process.env.CRON_SECRET || '').trim();
 const TELEGRAM_SYNC_INTERVAL_MS = Number(process.env.TELEGRAM_SYNC_INTERVAL_MS || 5000);
 const STATIC_DIR = path.join(__dirname, 'public');
 
@@ -29,7 +31,7 @@ const MIME_TYPES = {
   '.wav': 'audio/wav'
 };
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   if (req.method === 'GET' && url.pathname.startsWith('/static/')) {
@@ -40,8 +42,30 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY),
-      telegramSyncConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY && TELEGRAM_BOT_TOKEN)
+      telegramSyncConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY && TELEGRAM_BOT_TOKEN),
+      telegramSyncSecretConfigured: Boolean(getTelegramSyncSecret())
     });
+  }
+
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/sync-telegram') {
+    if (!isAuthorizedSyncRequest(req, url)) {
+      return sendJson(res, 401, {
+        ok: false,
+        error: 'Unauthorized'
+      });
+    }
+
+    try {
+      await syncTelegramIntegrations();
+      return sendJson(res, 200, {
+        ok: true
+      });
+    } catch (error) {
+      return sendJson(res, 500, {
+        ok: false,
+        error: error.message
+      });
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/') {
@@ -117,16 +141,18 @@ const server = http.createServer(async (req, res) => {
     ok: false,
     error: 'Not found'
   });
-});
+}
+
+const server = http.createServer(handleRequest);
 
 if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`Tipalets listening on ${APP_URL}`);
   });
 
-  if (SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY && SUPABASE_SERVICE_ROLE_KEY && TELEGRAM_BOT_TOKEN) {
+  if (!process.env.VERCEL && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY && SUPABASE_SERVICE_ROLE_KEY && TELEGRAM_BOT_TOKEN) {
     startTelegramSyncWorker();
-  } else {
+  } else if (!process.env.VERCEL) {
     console.warn('Telegram sync worker disabled. Configure SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, SUPABASE_SERVICE_ROLE_KEY, and TELEGRAM_BOT_TOKEN to enable background ingestion.');
   }
 }
@@ -138,7 +164,7 @@ function renderDocument({ title, mode, routeData = {} }) {
     appUrl: APP_URL,
     supabaseUrl: SUPABASE_URL,
     supabasePublishableKey: SUPABASE_PUBLISHABLE_KEY,
-    telegramSyncConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY)
+    telegramSyncConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY && TELEGRAM_BOT_TOKEN)
   });
 
   return `<!doctype html>
@@ -650,8 +676,28 @@ function isMissingSchemaError(error) {
   return error.message.includes('PGRST205') || error.message.includes("Could not find the table 'public.client_integrations'");
 }
 
+function isAuthorizedSyncRequest(req, url) {
+  const syncSecret = getTelegramSyncSecret();
+  if (!syncSecret) {
+    return false;
+  }
+
+  const authHeader = req.headers.authorization || '';
+  if (authHeader === `Bearer ${syncSecret}`) {
+    return true;
+  }
+
+  return url.searchParams.get('secret') === syncSecret;
+}
+
+function getTelegramSyncSecret() {
+  return CRON_SECRET || TELEGRAM_SYNC_SECRET;
+}
+
 module.exports = {
   server,
+  handleRequest,
+  syncTelegramIntegrations,
   parseDonationMessage,
   extractTelegramMessage,
   getMessageText,
